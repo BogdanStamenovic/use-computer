@@ -1,0 +1,65 @@
+[build-system]
+requires = ["hatchling"]
+build-backend = "hatchling.build"
+
+[project]
+name = "use-computer"
+version = "0.1.0"
+description = "Let an agent see and drive a GNOME Wayland desktop: screenshots, input, accessibility tree, OCR and audio, as an MCP server and CLI."
+readme = "README.md"
+requires-python = ">=3.12"
+license = { text = "MIT" }
+authors = [{ name = "Bogdan Stamenovic" }]
+keywords = ["computer-use", "mcp", "gnome", "wayland", "automation", "cli"]
+classifiers = [
+  "Development Status :: 3 - Alpha",
+  "Environment :: Console",
+  "License :: OSI Approved :: MIT License",
+  "Operating System :: POSIX :: Linux",
+  "Programming Language :: Python :: 3",
+]
+# PyGObject (gi: Gio, Gst, Atspi) is deliberately NOT listed: building it from
+# PyPI needs cairo/gobject-introspection headers, and the typelibs must match
+# the system's GNOME anyway. The venv is created with --system-site-packages
+# and uses the distro's python-gobject.
+dependencies = [
+  "mcp>=2.2,<3",
+  "numpy>=1.26",
+  "pillow>=10",
+]
+
+[project.optional-dependencies]
+audio = ["faster-whisper>=1.1"]
+dev = [
+  "pytest>=8.0,<10",
+  "ruff>=0.6,<1",
+  "mypy>=1.11,<3",
+]
+
+[project.scripts]
+use-computer = "use_computer.cli:main"
+use-computer-mcp = "use_computer.mcp_server:main"
+
+[tool.hatch.build.targets.wheel]
+packages = ["src/use_computer"]
+
+[tool.pytest.ini_options]
+testpaths = ["tests"]
+markers = ["e2e: drives a headless GNOME Shell (tests/e2e/headless-shell.sh)"]
+
+[tool.ruff]
+line-length = 100
+
+[tool.mypy]
+python_version = "3.12"
+warn_unused_ignores = true
+warn_redundant_casts = true
+ignore_missing_imports = true
+
+[tool.ruff.lint.per-file-ignores]
+# Broad excepts are deliberate at process boundaries (daemon request loop, doctor,
+# optional-dependency probes) where one failure must not take the service down.
+"src/use_computer/{daemon,doctor,audio,controller}.py" = ["BLE001", "S112"]
+"src/use_computer/{cli,doctor}.py" = ["PLW1510"]
+"src/use_computer/daemon.py" = ["SIM115", "BLE001"]
+"tests/e2e/*" = ["ASYNC230", "SIM115"]
