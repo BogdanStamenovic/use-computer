@@ -136,7 +136,25 @@ def serve() -> int:
             ctl.session.stop()
         path.unlink(missing_ok=True)
         listener.close()
+        _reap_desktop()
     return 0
+
+
+def _reap_desktop() -> None:
+    """Stop the virtual desktop this daemon was started for, if any.
+
+    The daemon inherits USE_COMPUTER_DESKTOP from whichever client spawned it, so
+    a virtual desktop's lifetime is tied to the daemon that drives it: when the
+    daemon idles out, the shell goes too instead of holding ~300 MB forever.
+    """
+    name = os.environ.get("USE_COMPUTER_DESKTOP", "")
+    try:
+        from .vd import REAL_NAMES, stop
+        if name and name.casefold() not in REAL_NAMES:
+            log(f"reaping virtual desktop {name!r}")
+            stop(name, quiet=True)
+    except Exception:
+        log("could not reap the virtual desktop:\n" + traceback.format_exc())
 
 
 def handle(ctl: Any, line: bytes) -> dict[str, Any]:

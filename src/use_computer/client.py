@@ -14,6 +14,20 @@ from . import UseComputerError
 from .daemon import log_path, socket_path
 
 
+def target(explicit: str | None = None, bus_only: bool = False,
+           start: bool = True) -> Any:
+    """Resolve and enter the desktop this process should drive.
+
+    Virtual by default: without an explicit target, agents and CLI calls land on a
+    virtual desktop rather than the user's screen. `--real` / USE_COMPUTER_DESKTOP=real
+    opts back in to it.
+    """
+    from . import vd
+    d = vd.resolve(explicit, start=start)
+    vd.apply_env(d, bus_only=bus_only)
+    return d
+
+
 class RemoteError(UseComputerError):
     def __init__(self, message: str, kind: str) -> None:
         super().__init__(message)

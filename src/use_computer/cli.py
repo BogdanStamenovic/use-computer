@@ -54,6 +54,11 @@ def _build_parser() -> argparse.ArgumentParser:
     p.add_argument("--client", help="client id for the control lease (default: cli)")
     p.add_argument("--takeover", action="store_true", help="take control from another agent")
     p.add_argument("-q", "--quiet", action="store_true", help="suppress non-error output")
+    g = p.add_mutually_exclusive_group()
+    g.add_argument("--desktop", metavar="NAME",
+                   help="virtual desktop to drive (default: 'agent'; 'real' for your screen)")
+    g.add_argument("--real", action="store_true",
+                   help="drive the real screen instead of a virtual desktop")
     sub = p.add_subparsers(dest="cmd", required=True, metavar="COMMAND")
 
     def target(sp: argparse.ArgumentParser, required: bool = True) -> None:
@@ -137,6 +142,26 @@ def _build_parser() -> argparse.ArgumentParser:
     sub.add_parser("shutdown", help="stop the daemon")
     sub.add_parser("daemon", help="run the daemon in the foreground")
     sub.add_parser("doctor", help="check the environment")
+
+    sp = sub.add_parser("vd", help="manage virtual desktops")
+    vsub = sp.add_subparsers(dest="vd_cmd", required=True, metavar="ACTION")
+    a = vsub.add_parser("start", help="start a virtual desktop")
+    a.add_argument("name", nargs="?", default=None)
+    a.add_argument("--size", default=None, metavar="WxH", help="virtual monitor size")
+    a = vsub.add_parser("stop", help="stop a virtual desktop")
+    a.add_argument("name", nargs="?", default=None)
+    a.add_argument("--all", action="store_true", help="stop every virtual desktop")
+    vsub.add_parser("list", help="list virtual desktops")
+
+    sp = sub.add_parser("watch", help="watch a desktop in a window, or in this terminal")
+    sp.add_argument("name", nargs="?", default=None, help="virtual desktop (default: current target)")
+    sp.add_argument("--tty", action="store_true", help="draw in this terminal instead of a window")
+    sp.add_argument("--control", action="store_true", help="forward your mouse and keys into it")
+    sp.add_argument("--fullscreen", action="store_true")
+    sp.add_argument("--once", action="store_true", help="draw a single frame and exit (--tty)")
+    sp.add_argument("--fps", type=float, default=None)
+    sp.add_argument("--format", dest="tty_format", choices=["kitty", "sixels", "iterm", "symbols"],
+                    help="terminal graphics format (default: auto-detect)")
 
     sp = sub.add_parser("audio", help="listen/transcribe (needs the audio extra)")
     asub = sp.add_subparsers(dest="audio_cmd", required=True, metavar="ACTION")
@@ -290,6 +315,44 @@ def _audio(args: argparse.Namespace) -> int:
     return 0
 
 
+def _vd(args: argparse.Namespace) -> int:
+    from . import vd
+
+    if args.vd_cmd == "list":
+        rows = [{"name": d.name, "size": d.size, "alive": d.alive,
+                 "up_minutes": round(d.age / 60, 1), "bus": d.bus} for d in vd.list_all()]
+        print(json.dumps(rows, indent=2))
+        return 0
+    if args.vd_cmd == "start":
+        d = vd.start(args.name or vd.DEFAULT_NAME, args.size or vd.DEFAULT_SIZE)
+        print(json.dumps({"name": d.name, "size": d.size, "bus": d.bus,
+                          "watch": f"use-computer watch {d.name}"}, indent=2))
+        return 0
+    if args.vd_cmd == "stop":
+        targets = [d.name for d in vd.list_all()] if args.all else [args.name or vd.DEFAULT_NAME]
+        if not targets:
+            print("no virtual desktops running")
+            return 0
+        for name in targets:
+            print(json.dumps(vd.stop(name, quiet=True), indent=2))
+        return 0
+    raise _UsageError(f"unhandled vd action {args.vd_cmd}")
+
+
+def _watch(args: argparse.Namespace, wanted: str | None) -> int:
+    from . import vd, viewer
+
+    # Resolve without applying the desktop's environment: the viewer is given the
+    # bus address explicitly, so its own window stays a normal citizen of the real
+    # session instead of registering itself on the watched desktop.
+    desktop = vd.resolve(args.name or wanted)
+    if args.tty:
+        return viewer.watch_tty(desktop, fps=args.fps or 8.0, fmt=args.tty_format,
+                                once=args.once)
+    return viewer.watch_window(desktop, control=args.control, fps=args.fps or 30.0,
+                               fullscreen=args.fullscreen)
+
+
 def main(argv: Sequence[str] | None = None) -> int:
     parser = _build_parser()
     try:
@@ -316,9 +379,18 @@ def main(argv: Sequence[str] | None = None) -> int:
                 print(unregister())
             return 0
 
+        from . import client as client_mod
         from .client import Client, RemoteError
 
+        wanted = "real" if args.real else args.desktop
+        if args.cmd == "vd":
+            return _vd(args)
+        if args.cmd == "watch":
+            return _watch(args, wanted)
+
         op, payload = _request(args)
+        # Read-only/teardown commands attach to a virtual desktop but never start one.
+        client_mod.target(wanted, start=op not in ("status", "stop", "shutdown"))
         if args.takeover:
             payload["takeover"] = True
         payload = {k: v for k, v in payload.items() if v is not None}

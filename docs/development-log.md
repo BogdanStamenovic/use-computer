@@ -105,3 +105,52 @@ Chose 2x (3x for regions ≤ 600 px), sparse-text mode.
   Serbian voice is barely intelligible, so this says little about real Serbian speech.
 - `pw-record -P '{ stream.capture.sink=true }'` captures the default output's monitor
   (what the speakers play) without a microphone.
+
+## 8. Promoting the test harness into virtual desktops
+
+The headless shell from §4 turned out to be the whole feature: driving it needed **no new
+control code at all**. `daemon.socket_path()` already hashes `DBUS_SESSION_BUS_ADDRESS` into
+the socket name, so a client whose env points at another bus transparently gets its own
+daemon, Mutter session and control lease. First run against a fresh headless shell — windows,
+screenshot, launching an app through the Activities search — worked unmodified. What was left
+was lifecycle, a viewer, and four bugs that only showed up by running it.
+
+**Teardown is the hard part.** Four separate traps, all found by running it, none by reading:
+
+1. **FUSE mounts outlive the shell.** xdg-document-portal and gvfsd leave `doc/` and `gvfs/`
+   mounted inside the runtime dir; `rm -rf` fails with "Operation not permitted" / "Device or
+   resource busy" forever after. Teardown must `fusermount3 -u` both first.
+2. **Killing by name nearly repeated the §4 incident.** A `pkill -f at-spi2-registryd` during
+   cleanup would have taken down the *real* desktop's accessibility bus. Only the process
+   group is ever signalled now, and `_killpg` refuses pgid ≤ 1 and our own group.
+3. **`alive` was the wrong thing to wait on.** It checks the bus socket, which disappears the
+   moment dbus-daemon dies — so the desktop looked dead while gnome-shell was still running,
+   and the SIGKILL escalation never fired. Every `vd stop` left an orphaned shell. Waiting on
+   the process group instead fixed it.
+4. **A stale state file must never delete an arbitrary directory.** `_teardown_runtime`
+   refuses any path whose name is not `use-computer-vd-*`, with a test for it.
+
+**The viewer must not join the desktop it watches.** The obvious implementation — set
+`DBUS_SESSION_BUS_ADDRESS` in `os.environ` and open a GTK window — works, and is wrong: GTK
+then resolves the *accessibility* bus on the watched desktop too, so the viewer window, drawn
+on the real screen, appeared in the virtual desktop's own `windows` list. An agent working
+there would see a phantom window and could try to click it. `RemoteSession` now takes an
+explicit `bus_address`, and the viewer never touches its environment.
+
+**Ctrl-C did nothing** in the GTK viewer: Python's signal handler never runs while GLib owns
+the main loop. `GLib.unix_signal_add` fixed it.
+
+**Frames.** Both viewers share one `RemoteSession` rather than opening a second `pipewiresrc`
+on Mutter's node — no second consumer, no duplicated pipeline, and it reuses the frame path
+the daemon already proves out. Feeding `gtk4paintablesink` directly also produced a
+`gst_video_frame_map_id: assertion 'info->finfo->format == meta->format' failed` warning;
+going through `session.frame()` → `Gdk.MemoryTexture` avoids the negotiation entirely.
+
+**Terminal output sizes** (full 1600x900 frame, chafa 1.18.2): kitty protocol ~2 MB, sixel
+~342 KB, symbols ~1.7 KB. Symbols is what makes `watch --tty` usable over SSH.
+
+**Headless hosts work.** On an Arch box at `multi-user.target` with no desktop session at all:
+shell started, ScreenCast v4 and RemoteDesktop v1 both answered, gnome-text-editor launched,
+frame captured. Mutter logged `Created gbm renderer for '/dev/dri/renderD128'` and obtained a
+high-priority EGL context, i.e. it rendered on the GPU rather than llvmpipe. The only errors
+were GDM registration failures (`No display available`), which are cosmetic.

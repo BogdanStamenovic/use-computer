@@ -55,10 +55,18 @@ class Frame:
 
 
 class RemoteSession:
-    def __init__(self, connector: str = "", cursor: int = CURSOR_HIDDEN) -> None:
+    def __init__(self, connector: str = "", cursor: int = CURSOR_HIDDEN,
+                 bus_address: str = "") -> None:
         self.connector = connector
         self.cursor = cursor
-        self.bus = Gio.bus_get_sync(Gio.BusType.SESSION)
+        if bus_address:
+            self.bus = Gio.DBusConnection.new_for_address_sync(
+                bus_address,
+                Gio.DBusConnectionFlags.AUTHENTICATION_CLIENT
+                | Gio.DBusConnectionFlags.MESSAGE_BUS_CONNECTION,
+                None, None)
+        else:
+            self.bus = Gio.bus_get_sync(Gio.BusType.SESSION)
         self.ctx = GLib.MainContext.default()
         self.rd_path = ""
         self.stream_path = ""

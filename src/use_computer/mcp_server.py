@@ -19,19 +19,45 @@ from . import UseComputerError, __version__
 from .client import Client
 
 INSTRUCTIONS = """\
-Controls the user's real GNOME desktop (mouse, keyboard, screen). Workflow: screenshot ->
-read_screen for refs -> act by ref when possible, by coordinate otherwise -> verify with a
-screenshot. Coordinates are pixels of the most recent screenshot. Batch predictable steps with
-computer_batch. If a result says control was revoked, stop and ask the user. Never type
-passwords, payment or identity data; never solve CAPTCHAs."""
+Controls a GNOME desktop (mouse, keyboard, screen). By default this is a VIRTUAL desktop --
+a second GNOME session nobody is looking at -- so you can work freely without taking over the
+user's screen. Tell them they can watch it with `use-computer watch`. The `desktop` tool says
+which one you are on and can switch to the real screen; only do that if the task genuinely
+needs their own session, and ask them first.
+Workflow: screenshot -> read_screen for refs -> act by ref when possible, by coordinate
+otherwise -> verify with a screenshot. Coordinates are pixels of the most recent screenshot.
+Batch predictable steps with computer_batch. If a result says control was revoked, stop and
+ask the user. Never type passwords, payment or identity data; never solve CAPTCHAs."""
 
 mcp = MCPServer("use-computer", instructions=INSTRUCTIONS, version=__version__)
 _client = Client(client_id=f"mcp:{os.getpid()}")
 _lock = threading.Lock()
 
 
-def _call_sync(op: str, **args: Any) -> dict[str, Any]:
+def _enter_desktop(name: str | None = None) -> str:
+    """Point this server at a desktop. Virtual by default; 'real' is the opt-in."""
+    from . import client as client_mod
+    from . import vd
+    global _entered
     with _lock:
+        _client.close()
+        d = client_mod.target(name)
+        _entered = True
+        return vd.describe(d)
+
+
+_entered = False
+
+
+def _call_sync(op: str, **args: Any) -> dict[str, Any]:
+    global _entered
+    with _lock:
+        if not _entered:
+            # Lazily, so merely loading the MCP server never spawns a GNOME Shell.
+            from . import client as client_mod
+            client_mod.target(os.environ.get("USE_COMPUTER_DESKTOP"),
+                              start=op not in ("status", "stop"))
+            _entered = True
         return _client.call(op, **{k: v for k, v in args.items() if v is not None})
 
 
@@ -358,6 +384,41 @@ async def session(
     except UseComputerError as exc:
         return _error(exc)
     return CallToolResult(content=[TextContent(type="text", text=_describe(r))])
+
+
+@mcp.tool(annotations=ToolAnnotations(read_only_hint=False))
+async def desktop(
+    action: Annotated[Literal["status", "use_virtual", "use_real", "list", "stop"], Field(
+        description="status = which desktop you are driving; use_virtual = switch to an "
+        "isolated virtual desktop (the default); use_real = take over the user's own screen, "
+        "which needs their agreement first; list = show virtual desktops; stop = shut one down")],
+    name: Annotated[str | None, Field(
+        description="virtual desktop name (default: 'agent')")] = None,
+) -> CallToolResult:
+    """Choose which desktop to drive, or inspect the virtual ones.
+
+    Work happens on a virtual desktop unless the user asks otherwise. The user can
+    see it at any time with `use-computer watch`.
+    """
+    try:
+        from . import vd
+        if action == "status":
+            d = vd.load(os.environ.get("USE_COMPUTER_DESKTOP", "")) if os.environ.get(
+                "USE_COMPUTER_DESKTOP", "").casefold() not in vd.REAL_NAMES else None
+            text = vd.describe(d)
+            if d is not None:
+                text += f"\n  the user can watch it with: use-computer watch {d.name}"
+        elif action == "list":
+            text = "\n".join(
+                f"{x.name}: {x.size}, {'up' if x.alive else 'dead'}, {x.age / 60:.0f}m"
+                for x in vd.list_all()) or "no virtual desktops"
+        elif action == "stop":
+            text = str(vd.stop(name or vd.DEFAULT_NAME, quiet=True)["done"])
+        else:
+            text = "now driving the " + _enter_desktop("real" if action == "use_real" else name)
+    except UseComputerError as exc:
+        return _error(exc)
+    return CallToolResult(content=[TextContent(type="text", text=text)])
 
 
 def main() -> None:

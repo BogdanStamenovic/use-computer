@@ -5,6 +5,19 @@ does: screenshots, mouse, keyboard, the accessibility tree with clickable refs, 
 clipboard, and listening to whatever the computer is playing. Think Claude in Chrome, but for
 the whole desktop instead of one browser tab.
 
+By default it does **not** touch your screen. It starts a *virtual desktop* — a second,
+isolated GNOME Shell with its own session bus, accessibility bus and virtual monitor — and
+works there, so you can keep using your machine. It is a real desktop (your extensions, your
+dock, real apps); nobody is looking at it until you ask to watch:
+
+```bash
+use-computer watch              # a window on your screen showing the agent's desktop
+use-computer watch --tty        # or draw it in this terminal
+use-computer watch --control    # take the mouse and keyboard yourself
+```
+
+Add `--real` to drive your own session instead.
+
 It ships as three things that share one daemon: an MCP server (`use-computer-mcp`), a CLI
 (`use-computer`), and a Claude skill (`skills/use-computer`) that teaches the workflow.
 
@@ -13,8 +26,12 @@ It ships as three things that share one daemon: an MCP server (`use-computer-mcp
 - **GNOME Shell on Wayland only.** It uses Mutter's private RemoteDesktop/ScreenCast D-Bus
   API. KDE, Sway, Hyprland and X11 sessions are not supported and nothing here pretends to be.
 - **Single monitor** (the primary one) today.
-- **It drives your real session.** The pointer moves; typing goes to the focused window. Don't
-  use the machine at the same time.
+- **`--real` drives your actual session.** The pointer moves; typing goes to the focused
+  window. Don't use the machine at the same time. The default virtual desktop has neither
+  problem, but it is also not your screen: an agent cannot see or fix what is on yours unless
+  you ask for `--real`.
+- **A virtual desktop costs a GNOME Shell** (~300 MB). It starts on first use and is reaped
+  when the daemon goes idle.
 - Accessibility coverage depends on the app. GTK/GNOME apps and Firefox are good;
   Chromium/Electron apps expose little unless started with `--force-renderer-accessibility`;
   games and canvases are pixels only.
@@ -40,10 +57,16 @@ It ships as three things that share one daemon: an MCP server (`use-computer-mcp
 | Listen / transcribe | `pw-record` of the default output's monitor + faster-whisper large-v3-turbo int8 | 62 s speech in 62 s, 2.1 GB RAM |
 | Kill switch | stopping screen sharing from the top bar revokes control until resumed | |
 | Multi-agent safety | one daemon, a 30 s control lease per client | |
+| Virtual desktops | isolated headless GNOME Shell per name; own D-Bus, a11y bus and runtime dir | ~4 s to start, GPU-accelerated where a DRM device exists |
+| Watching one | window (GTK4) or terminal (chafa: kitty/sixel/symbols) | symbols mode ≈ 1.7 KB/frame, so it works over SSH |
+| Taking over | `watch --control` forwards your mouse, keys and scroll into it | |
+| Headless hosts | works on a box with no desktop session at all | verified on an Arch server at `multi-user.target` |
 
 ## What does not exist yet
 
 - Multi-monitor support.
+- Sound *inside* a virtual desktop: it shares the host's PipeWire, so `listen` hears the real
+  machine's output, not the virtual desktop's apps.
 - Window management beyond "open/switch app via search" (no move/resize/list-geometry API —
   GNOME blocks `Shell.Introspect` for outside callers).
 - A way to see the mouse cursor in screenshots (it's hidden on purpose).
@@ -91,7 +114,10 @@ From a shell:
 
 ```bash
 use-computer doctor
-use-computer screenshot                 # prints a PNG path
+use-computer screenshot                 # prints a PNG path (of the virtual desktop)
+use-computer --real screenshot          # ...of your actual screen
+use-computer vd list                    # virtual desktops
+use-computer watch                      # watch the agent work
 use-computer tree                       # accessibility tree of the focused window
 use-computer find "Save"
 use-computer click --ref ref_12
@@ -114,7 +140,12 @@ use-computer stop                       # end the session, indicator disappears
 | `windows`, `open-app NAME`, `clipboard get\|set` | desktop |
 | `batch FILE\|-` | JSON list of `{"op", "args"}` |
 | `audio setup\|status\|listen SECONDS\|transcribe PATH` | hearing |
+| `vd start [NAME] [--size WxH]`, `vd stop [NAME\|--all]`, `vd list` | virtual desktops |
+| `watch [NAME] [--tty] [--control] [--fullscreen] [--fps N] [--format kitty\|sixels\|symbols]` | see one |
 | `status`, `stop`, `resume`, `shutdown`, `daemon`, `doctor`, `mcp-register`, `mcp-unregister` | plumbing |
+
+`--desktop NAME` picks which virtual desktop to drive (default `agent`); `--real` drives your
+own session.
 
 `--json` prints raw results. Exit codes: 0 ok, 1 failed, 2 usage error, 3 control revoked by the user.
 

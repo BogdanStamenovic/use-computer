@@ -114,10 +114,50 @@ def _daemon() -> tuple[str, str]:
         return OK, "not running (starts on first use)"
 
 
+def _virtual_desktops() -> tuple[str, str]:
+    """Can we start an isolated GNOME Shell, and are any running?"""
+    from . import vd
+    missing = [t for t in ("gnome-shell", "dbus-run-session") if not shutil.which(t)]
+    helpers = [n for n in ("at-spi-bus-launcher", "at-spi2-registryd")
+               if not any(os.path.exists(f"{d}/{n}") for d in
+                          ("/usr/lib", "/usr/libexec", "/usr/lib/at-spi2-core"))]
+    if missing or helpers:
+        return FAIL, "cannot start one, missing: " + ", ".join(missing + helpers)
+    running = vd.list_all()
+    live = [d for d in running if d.alive]
+    detail = f"supported; {len(live)} running"
+    if live:
+        detail += " (" + ", ".join(f"{d.name} {d.size}" for d in live) + ")"
+    stale = [d.name for d in running if not d.alive]
+    if stale:
+        return WARN, detail + f"; stale state for {', '.join(stale)} (use-computer vd stop --all)"
+    return OK, detail
+
+
+def _target() -> tuple[str, str]:
+    from . import vd
+    name = os.environ.get("USE_COMPUTER_DESKTOP", vd.DEFAULT_NAME)
+    if name.casefold() in vd.REAL_NAMES:
+        return WARN, "real desktop — actions will move the user's own pointer"
+    d = vd.load(name)
+    state = "running" if (d is not None and d.alive) else "starts on first use"
+    return OK, f"virtual desktop {name!r} ({state})"
+
+
+def _watch_tty() -> tuple[str, str]:
+    if not shutil.which("chafa"):
+        return WARN, "chafa missing: `use-computer watch --tty` needs it (pacman -S chafa)"
+    out = subprocess.run(["chafa", "--version"], capture_output=True, text=True)
+    return OK, out.stdout.splitlines()[0] if out.stdout else "present"
+
+
 def run() -> int:
     print(f"python {sys.version.split()[0]} at {sys.executable}")
     results = [
         _check("desktop session", _session),
+        _check("target", _target),
+        _check("virtual desktops", _virtual_desktops),
+        _check("watch --tty", _watch_tty),
         _check("Mutter RemoteDesktop", _dbus_name("org.gnome.Mutter.RemoteDesktop")),
         _check("Mutter ScreenCast", _dbus_name("org.gnome.Mutter.ScreenCast")),
         _check("GStreamer PipeWire", _gst),
