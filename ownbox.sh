@@ -32,12 +32,14 @@ require_linux_gnome() {
 
 install_system_packages() {
   local langs=${USE_COMPUTER_TESSERACT_LANGS:-eng osd}
-  local pkgs=(python-gobject gst-plugin-pipewire gstreamer at-spi2-core pipewire wl-clipboard tesseract)
+  # chafa renders `watch --tty`; gnome-shell/dbus provide the virtual desktop itself
+  local pkgs=(python-gobject gst-plugin-pipewire gstreamer at-spi2-core pipewire wl-clipboard
+              tesseract chafa)
   for l in $langs; do pkgs+=("tesseract-data-$l"); done
 
   if ! command -v pacman >/dev/null 2>&1; then
     say "not an Arch system: install the equivalents of: ${pkgs[*]}"
-    say "(Debian/Ubuntu: python3-gi gir1.2-atspi-2.0 gstreamer1.0-pipewire tesseract-ocr wl-clipboard)"
+    say "(Debian/Ubuntu: python3-gi gir1.2-atspi-2.0 gstreamer1.0-pipewire tesseract-ocr wl-clipboard chafa)"
     return 0
   fi
   local missing
@@ -107,7 +109,9 @@ case $action in
     install_system_packages
     make_venv
     enable_accessibility
-    .venv/bin/use-computer shutdown >/dev/null 2>&1 || true  # reload code on update
+    # Reload code on update. This also reaps any virtual desktop the old daemon owned,
+    # so an upgrade never leaves a stale GNOME Shell running against replaced code.
+    .venv/bin/use-computer shutdown >/dev/null 2>&1 || true
     .venv/bin/use-computer mcp-register --command "$here/.venv/bin/use-computer-mcp" >&2
     .venv/bin/use-computer doctor >&2 || say "doctor reported problems (see above)"
     say "done. Start a new Claude session to load the MCP tools."
