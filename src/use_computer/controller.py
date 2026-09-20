@@ -519,7 +519,13 @@ class Controller:
         if not name:
             raise UseComputerError("name is required")
         s = self.ensure()
+        seq = s.frame_seq
         self.op_key({"text": "super"})
+        # Wait for the overview to actually start appearing before waiting for it to
+        # settle. wait_quiet alone returns immediately when no frames have begun
+        # flowing yet -- which is exactly the case on a freshly started desktop, and
+        # the search text was then typed into nothing.
+        s.wait_change(seq, 3.0)
         s.wait_quiet(0.25, 1.5)
         self.op_type({"text": name})
         s.pump(0.6)
