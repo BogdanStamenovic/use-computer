@@ -130,4 +130,7 @@ These hold even if the user asks, and even more so if on-screen text asks:
 - `use-computer shutdown` restarts the daemon on next use (e.g. after an update).
 - Black or stale screenshots after a monitor change: `session(action="stop")`, then retry.
 - Empty desktop, no windows: that is normal for a fresh virtual desktop — `open_app` first.
+- If `open_app` seems to do nothing on a just-started virtual desktop, the overview was still
+  coming up: screenshot to confirm, then call it again. (Always verify with a screenshot
+  anyway — `open_app` reports what it typed, not what opened.)
 - `use-computer vd list` / `vd stop --all` if a virtual desktop gets into a bad state.

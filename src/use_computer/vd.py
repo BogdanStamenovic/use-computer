@@ -149,8 +149,18 @@ def start(name: str = DEFAULT_NAME, size: str = DEFAULT_SIZE,
     return d
 
 
+SETTLE = float(os.environ.get("USE_COMPUTER_VD_SETTLE", "2.0"))
+
+
 def _wait_for_mutter(d: Desktop, end: float) -> None:
-    """The bus exists before Mutter claims its names; clients must not race that."""
+    """The bus exists before Mutter claims its names; clients must not race that.
+
+    Mutter answering is necessary but not sufficient: GNOME Shell's own UI (the
+    Activities overview that `open_app` drives) is still coming up for a moment
+    after that, and an `open_app` issued into the gap silently does nothing. There
+    is no crisp readiness signal for the overview, so this settles for a short
+    fixed wait -- a heuristic, but it turns a confusing no-op into a working call.
+    """
     while time.monotonic() < end:
         probe = subprocess.run(
             ["gdbus", "call", "--session", "--dest", "org.gnome.Mutter.ScreenCast",
@@ -158,6 +168,7 @@ def _wait_for_mutter(d: Desktop, end: float) -> None:
              "org.freedesktop.DBus.Properties.Get", "org.gnome.Mutter.ScreenCast", "Version"],
             env={**os.environ, **d.env}, capture_output=True, text=True, check=False)
         if probe.returncode == 0:
+            time.sleep(SETTLE)
             return
         time.sleep(0.2)
     raise UseComputerError(f"virtual desktop {d.name!r} started but Mutter never appeared on its bus")
