@@ -41,6 +41,7 @@ BTN = {"left": 0x110, "right": 0x111, "middle": 0x112, "back": 0x113, "forward":
 TEXT_MIMES = ["text/plain;charset=utf-8", "text/plain", "UTF8_STRING", "STRING", "TEXT"]
 
 CURSOR_HIDDEN, CURSOR_EMBEDDED = 0, 1
+VIRTUAL_SIZE = (1920, 1080)
 
 
 class ControlRevoked(UseComputerError):
@@ -138,10 +139,23 @@ class RemoteSession:
         sc_path = self._call(SC, "/org/gnome/Mutter/ScreenCast", SC, "CreateSession",
                              GLib.Variant("(a{sv})", ({"remote-desktop-session-id":
                                                        GLib.Variant("s", sid)},)))[0]
-        self.stream_path = self._call(
-            SC, sc_path, SC + ".Session", "RecordMonitor",
-            GLib.Variant("(sa{sv})", (self.connector,
-                                      {"cursor-mode": GLib.Variant("u", self.cursor)})))[0]
+        opts = {"cursor-mode": GLib.Variant("u", self.cursor)}
+        self.virtual = False
+        try:
+            self.stream_path = self._call(
+                SC, sc_path, SC + ".Session", "RecordMonitor",
+                GLib.Variant("(sa{sv})", (self.connector, opts)))[0]
+        except UseComputerError as exc:
+            # A gnome-remote-desktop "remote login" session has no monitor at all once
+            # the RDP client disconnects, so RecordMonitor has nothing to record.
+            # RecordVirtual makes Mutter create a monitor sized by our caps, the same
+            # way gnome-remote-desktop itself gets one.
+            if "Unknown monitor" not in str(exc):
+                raise
+            self.virtual = True
+            self.stream_path = self._call(
+                SC, sc_path, SC + ".Session", "RecordVirtual",
+                GLib.Variant("(a{sv})", (opts,)))[0]
 
         def sub(iface: str, member: str, path: str, cb) -> None:  # type: ignore[no-untyped-def]
             self._subs.append(self.bus.signal_subscribe(
@@ -154,9 +168,9 @@ class RemoteSession:
 
         self._call(RD, self.rd_path, RD_SESSION, "Start")
         self._wait(lambda: self.node_id is not None, 5.0, "PipeWire stream did not appear")
-        params = self._call(SC, self.stream_path, PROPS, "Get",
-                            GLib.Variant("(ss)", (SC + ".Stream", "Parameters")))[0]
-        sw, sh = params["size"]
+        params = {} if self.virtual else self._call(
+            SC, self.stream_path, PROPS, "Get",
+            GLib.Variant("(ss)", (SC + ".Stream", "Parameters")))[0]
         try:
             self._call(RD, self.rd_path, RD_SESSION, "EnableClipboard",
                        GLib.Variant("(a{sv})", ({},)))
@@ -168,6 +182,7 @@ class RemoteSession:
             assert self._sample is not None
             s = self._sample.get_caps().get_structure(0)
             fw, fh = s.get_value("width"), s.get_value("height")
+        sw, sh = params.get("size", (fw, fh))
         self.screen = Screen(int(sw), int(sh), int(fw), int(fh),
                              int(os.environ.get("USE_COMPUTER_MAX_W", "1280")),
                              int(os.environ.get("USE_COMPUTER_MAX_H", "800")))
@@ -176,8 +191,10 @@ class RemoteSession:
     def _start_pipeline(self) -> None:
         # always-copy: Mutter hands out DMA-BUF/MemFd buffers that are recycled;
         # without copying, a parked sample's memory is overwritten underneath us.
+        # A virtual monitor takes its mode from what the consumer negotiates.
+        size = (",width={},height={}".format(*VIRTUAL_SIZE) if self.virtual else "")
         desc = (f"pipewiresrc path={self.node_id} always-copy=true do-timestamp=true ! "
-                "videoconvert ! video/x-raw,format=RGB ! "
+                f"video/x-raw{size} ! videoconvert ! video/x-raw,format=RGB ! "
                 "appsink name=sink emit-signals=true max-buffers=1 drop=true sync=false")
         pipeline = Gst.parse_launch(desc)
         sink = pipeline.get_by_name("sink")
