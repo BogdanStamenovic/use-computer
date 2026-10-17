@@ -85,6 +85,9 @@ def _qr(url: str, out: Path) -> str | None:
     """Write a QR PNG of the URL and return a terminal rendering. None if qrencode is absent."""
     if not shutil.which("qrencode"):
         return None
+    # The QR carries the live token: create it owner-only before qrencode writes it.
+    out.touch(mode=0o600, exist_ok=True)
+    out.chmod(0o600)
     subprocess.run(["qrencode", "-o", str(out), "-s", "8", "-m", "2", url], check=False)
     term = subprocess.run(["qrencode", "-t", "UTF8", "-m", "1", url], capture_output=True,
                           text=True, check=False)

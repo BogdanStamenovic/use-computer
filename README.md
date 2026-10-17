@@ -31,7 +31,10 @@ It ships as three things that share one daemon: an MCP server (`use-computer-mcp
   problem, but it is also not your screen: an agent cannot see or fix what is on yours unless
   you ask for `--real`.
 - **A virtual desktop costs a GNOME Shell** (~300 MB). It starts on first use and is reaped
-  when the daemon goes idle.
+  when the daemon goes idle — unless its keyring is unlocked, in which case it stays until
+  `vd stop`.
+- **An unlocked keyring is readable by every agent driving that desktop.** That is the point
+  (apps come up logged in), but `secret-tool` in that desktop's environment reads any secret.
 - Accessibility coverage depends on the app. GTK/GNOME apps and Firefox are good;
   Chromium/Electron apps expose little unless started with `--force-renderer-accessibility`;
   games and canvases are pixels only.
@@ -61,6 +64,8 @@ It ships as three things that share one daemon: an MCP server (`use-computer-mcp
 | Watching one | window (GTK4) or terminal (chafa: kitty/sixel/symbols) | symbols mode ≈ 1.7 KB/frame, so it works over SSH |
 | Taking over | `watch --control` forwards your mouse, keys and scroll into it | |
 | Headless hosts | works on a box with no desktop session at all | verified on an Arch server at `multi-user.target` |
+| Real keyring in a virtual desktop | locked gnome-keyring-daemon on the desktop's bus; `keyring unlock` serves a page the user types the password into | Chrome in the VD opened Gmail logged in; wrong password leaves `login.keyring` byte-identical |
+| Logins without the agent seeing them | `handoff` (CLI and MCP tool): single-use page with a live screenshot; the text is typed into the focused field | refuses unless an app's password field has focus |
 
 ## What does not exist yet
 
@@ -71,6 +76,11 @@ It ships as three things that share one daemon: an MCP server (`use-computer-mcp
   GNOME blocks `Shell.Introspect` for outside callers).
 - A way to see the mouse cursor in screenshots (it's hidden on purpose).
 - Non-GNOME compositors.
+- HTTPS for the secret page (it relies on Tailscale's encryption; `--host` on a plain LAN
+  sends the secret in clear).
+- Unlocking keyrings other than `login`.
+- Any testing of your real session and a virtual desktop both holding `login.keyring` open.
+  On this box no real session runs, so it never came up; elsewhere, prefer one at a time.
 
 ## Install
 
@@ -142,12 +152,53 @@ use-computer stop                       # end the session, indicator disappears
 | `audio setup\|status\|listen SECONDS\|transcribe PATH` | hearing |
 | `vd start [NAME] [--size WxH]`, `vd stop [NAME\|--all]`, `vd list` | virtual desktops |
 | `watch [NAME] [--tty] [--control] [--fullscreen] [--fps N] [--format kitty\|sixels\|symbols]` | see one |
+| `keyring status`, `keyring unlock [--qr [PNG]] [--host] [--timeout]` | the real login keyring inside a virtual desktop |
+| `handoff [--prompt TEXT] [--visible] [--no-enter] [--qr [PNG]]` | the user types a password/2FA code into the focused field |
 | `status`, `stop`, `resume`, `shutdown`, `daemon`, `doctor`, `mcp-register`, `mcp-unregister` | plumbing |
 
 `--desktop NAME` picks which virtual desktop to drive (default `agent`); `--real` drives your
 own session.
 
 `--json` prints raw results. Exit codes: 0 ok, 1 failed, 2 usage error, 3 control revoked by the user.
+
+### Keyring and logins
+
+A virtual desktop has its own session bus, so it cannot see any other session's keyring,
+and Chrome on Linux keeps the key to its cookie store there ("Chrome Safe Storage"): without
+it every site looks logged out. Each virtual desktop therefore runs a gnome-keyring-daemon
+over your real `~/.local/share/keyrings`, starting **locked**.
+
+```bash
+use-computer keyring unlock --qr     # prints a URL (+ QR); open it on your phone, type the password
+use-computer keyring status          # {"running": true, "locked": false}
+use-computer handoff --prompt "GitHub password for BogdanStamenovic"   # agent focused the field first
+```
+
+Both commands serve the same page (`secretpage.py`):
+
+| Property | Value |
+|---|---|
+| Bound to | the tailnet IPv4 (`tailscale ip -4`), else 127.0.0.1; `--host` overrides |
+| Access | 192-bit random token in the path; anything else is a bare 404 |
+| Lifetime | one success, 5 failed tries, or `--timeout` (default 600 s), whichever comes first |
+| Transport | plain HTTP. Tailnet traffic is WireGuard-encrypted; over a LAN it would not be |
+| Where the secret goes | keyring: gnome-keyring's `UnlockWithMasterPassword` D-Bus call. handoff: `type(secret=True)` into the focused field. Never disk, argv, or logs |
+
+Odd-looking choices, explained:
+
+- **Unlocking uses an "InternalUnsupportedGuiltRidden" D-Bus interface** (what Seahorse uses).
+  `gnome-keyring-daemon --start --unlock` is refused by the daemon, and `--replace --unlock`
+  starts a new daemon outside the desktop's process group, which would outlive `vd stop`.
+- **`keyring unlock` refuses when `login.keyring` does not exist**, because unlocking a missing
+  keyring makes gnome-keyring create a new one with whatever was typed.
+- **Secret typing checks focus first.** A test handoff on a fresh desktop typed the "password"
+  into the overview's search bar in plain text. `type(secret=True)` now refuses unless an
+  app's `password text` element (or a text field, with `--visible`) has focus, wipes the
+  clipboard if a non-ASCII paste would leave the secret there, and reports nothing about what
+  was typed.
+- **handoff runs under the caller's control lease.** A shell-run handoff from an MCP agent would
+  otherwise be locked out by that agent's own 30 s lease; the MCP tool runs the page inside the
+  MCP server for that reason.
 
 ## How it works
 
