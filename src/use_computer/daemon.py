@@ -146,11 +146,22 @@ def _reap_desktop() -> None:
     The daemon inherits USE_COMPUTER_DESKTOP from whichever client spawned it, so
     a virtual desktop's lifetime is tied to the daemon that drives it: when the
     daemon idles out, the shell goes too instead of holding ~300 MB forever.
+
+    Except when its keyring is unlocked: that took the user typing their password,
+    and reaping would silently re-lock it and kill every logged-in app. Such a
+    desktop outlives the daemon (the next client's daemon reattaches to it) and
+    ends only on an explicit `vd stop`.
     """
     name = os.environ.get("USE_COMPUTER_DESKTOP", "")
     try:
-        from .vd import REAL_NAMES, stop
+        from .vd import REAL_NAMES, load, stop
         if name and name.casefold() not in REAL_NAMES:
+            d = load(name)
+            if d is not None and d.alive:
+                from .keyring import status
+                if status(d).get("locked") is False:
+                    log(f"keeping virtual desktop {name!r}: its keyring is unlocked")
+                    return
             log(f"reaping virtual desktop {name!r}")
             stop(name, quiet=True)
     except Exception:
