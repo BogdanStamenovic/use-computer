@@ -325,6 +325,9 @@ class Controller:
             s.button("left", False)
             s.pump(0.15)
         delay = float(args.get("delay", 0.004))
+        secret = bool(args.get("secret"))
+        if secret:
+            self._require_secret_target(bool(args.get("visible")))
         pasted = False
         for seg in segment_text(text):
             if seg.kind == "keys":
@@ -335,14 +338,39 @@ class Controller:
                     s.key(ks, False)
                     s.pump(delay)
             else:
-                self._paste(seg.text)
+                self._paste(seg.text, secret=secret)
                 pasted = True
         s.pump(0.05)
+        if secret:
+            # Say nothing about the content: not even whether it matched what is in the
+            # field, since a non-password field would then echo it via the a11y tree.
+            return {"done": "typed the secret"}
         return {"done": f"typed {len(text)} characters" + (" (non-ASCII via clipboard paste)"
                                                           if pasted else ""),
                 "verified": self._verify_typed(text)}
 
-    def _paste(self, text: str) -> None:
+    def _require_secret_target(self, visible: bool) -> None:
+        """Refuse to type a secret unless an app's password field has keyboard focus.
+
+        Keystrokes go wherever focus is. In a fresh virtual desktop that is often the
+        overview's search bar, which would show a password in plain text and search
+        for it. A test handoff did exactly that before this check existed.
+        """
+        allowed = {"password text"} | ({"entry", "text"} if visible else set())
+        active = self.a11y.active_frame()
+        if active is None:
+            raise UseComputerError("refusing to type a secret: no application window has focus")
+        app, frame = active
+        if (app.get_name() or "") == "gnome-shell":
+            raise UseComputerError("refusing to type a secret: focus is in the shell, not an app")
+        focused = self.a11y.focused(frame)
+        role = focused.get_role_name() if focused is not None else None
+        if role not in allowed:
+            raise UseComputerError(
+                f"refusing to type a secret: the focused element is {role or 'nothing'!r}, "
+                f"expected one of {sorted(allowed)}; click the field first")
+
+    def _paste(self, text: str, secret: bool = False) -> None:
         s = self.ensure()
         previous = s.clipboard_get()
         s.clipboard_set(text)
@@ -356,6 +384,8 @@ class Controller:
         s.pump(0.35)  # the target app requests the data asynchronously; serve it
         if previous is not None:
             s.clipboard_set(previous)
+        elif secret:
+            s.clipboard_set("")  # an empty clipboard would otherwise keep the secret
 
     def _terminal_focused(self) -> bool:
         active = self.a11y.active_frame()

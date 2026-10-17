@@ -6,6 +6,7 @@ find / form_input) so an agent that knows one knows the other.
 
 from __future__ import annotations
 
+import base64
 import os
 import threading
 from typing import Annotated, Any, Literal
@@ -27,7 +28,11 @@ needs their own session, and ask them first.
 Workflow: screenshot -> read_screen for refs -> act by ref when possible, by coordinate
 otherwise -> verify with a screenshot. Coordinates are pixels of the most recent screenshot.
 Batch predictable steps with computer_batch. If a result says control was revoked, stop and
-ask the user. Never type passwords, payment or identity data; never solve CAPTCHAs."""
+ask the user. Never type passwords, payment or identity data; never solve CAPTCHAs.
+When a site or app needs the user's password or a 2FA code: focus the field, call `handoff`
+with action=start, give the user the URL (and QR image), then poll action=status. The user
+types it on that page and it is typed into the field for you; you never see it. If an app
+says the keyring is locked, the user runs `use-computer keyring unlock` the same way."""
 
 mcp = MCPServer("use-computer", instructions=INSTRUCTIONS, version=__version__)
 _client = Client(client_id=f"mcp:{os.getpid()}")
@@ -419,6 +424,76 @@ async def desktop(
     except UseComputerError as exc:
         return _error(exc)
     return CallToolResult(content=[TextContent(type="text", text=text)])
+
+
+_handoff: dict[str, Any] = {}
+
+
+@mcp.tool(annotations=ToolAnnotations(read_only_hint=False))
+async def handoff(
+    action: Annotated[Literal["start", "status"], Field(
+        description="start = open a single-use page for the user; status = did they submit")],
+    prompt: Annotated[str | None, Field(
+        description="what the user is asked for, e.g. 'Google password for bogdan@...'")] = None,
+    visible: Annotated[bool, Field(
+        description="plain-text box (2FA codes) instead of a password box")] = False,
+    enter: Annotated[bool, Field(description="press Enter after typing")] = True,
+) -> CallToolResult:
+    """Let the user type a password or code into the focused field without you seeing it.
+
+    First focus the field (click it). `start` returns a URL (reachable over the tailnet)
+    and a QR code image; pass both to the user, then poll `status` until it says typed,
+    closed or timed out. Typing is refused unless an app's password field (or a text
+    field, with visible=true) has focus.
+    """
+    from . import handoff as handoff_mod
+    from . import secretpage, vd
+
+    if action == "status":
+        if not _handoff:
+            return _error(UseComputerError("no handoff has been started"))
+        t = _handoff["thread"]
+        state = ("pending" if t.is_alive() else "typed" if _handoff.get("ok") else
+                 "closed without a successful submit")
+        log = "\n".join(ln for ln in _handoff["log"] if not ln.startswith(("open:", "\u2588")))
+        return CallToolResult(content=[TextContent(type="text", text=f"{state}\n{log}")])
+    if _handoff and _handoff["thread"].is_alive():
+        return _error(UseComputerError("a handoff is already open; poll status"))
+    try:
+        if not _entered:
+            _enter_desktop(os.environ.get("USE_COMPUTER_DESKTOP"))
+        d = vd.load(os.environ.get("USE_COMPUTER_DESKTOP", "")) if os.environ.get(
+            "USE_COMPUTER_DESKTOP", "").casefold() not in vd.REAL_NAMES else None
+        lines: list[str] = []
+        qr = vd.state_dir() / f"handoff-qr-{os.getpid()}.png"
+        _handoff.clear()
+        _handoff["log"] = lines
+        p = handoff_mod.page(prompt or "Type the password for the field the agent has focused.",
+                             vd.describe(d), _call_sync, enter=enter, visible=visible)
+
+        def run() -> None:
+            _handoff["ok"] = secretpage.serve(p, qr_path=qr, log=lines.append)
+
+        t = threading.Thread(target=run, daemon=True)
+        _handoff["thread"] = t
+        t.start()
+        for _ in range(100):
+            if lines:
+                break
+            await anyio.sleep(0.05)
+        url = next((ln[6:] for ln in lines if ln.startswith("open: ")), None)
+        if url is None:
+            return _error(UseComputerError("handoff page did not start: " + " ".join(lines)))
+        await anyio.sleep(0.3)  # the QR file is written right after the URL line
+    except UseComputerError as exc:
+        return _error(exc)
+    blocks: list[Any] = [TextContent(type="text", text=(
+        f"Give the user this link (single use, 10 min, 5 tries): {url}\n"
+        f"QR image: {qr if qr.exists() else 'unavailable'}"))]
+    if qr.exists():
+        blocks.append(ImageContent(type="image", data=base64.b64encode(qr.read_bytes()).decode(),
+                                   mime_type="image/png"))
+    return CallToolResult(content=blocks)
 
 
 def main() -> None:

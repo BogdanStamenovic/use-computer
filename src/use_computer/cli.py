@@ -45,6 +45,13 @@ def _region(v: str) -> list[float]:
     return [float(p) for p in parts]
 
 
+def _secret_page_args(sp: argparse.ArgumentParser) -> None:
+    sp.add_argument("--host", help="address to bind (default: tailnet IPv4, else 127.0.0.1)")
+    sp.add_argument("--timeout", type=float, default=600, help="seconds before the link closes")
+    sp.add_argument("--qr", metavar="PNG", nargs="?", const="",
+                    help="also write a QR code of the link (default path in the state dir)")
+
+
 def _build_parser() -> argparse.ArgumentParser:
     p = _ArgumentParser(prog="use-computer",
                         description="See and drive the GNOME desktop. Coordinates are in "
@@ -152,6 +159,22 @@ def _build_parser() -> argparse.ArgumentParser:
     a.add_argument("name", nargs="?", default=None)
     a.add_argument("--all", action="store_true", help="stop every virtual desktop")
     vsub.add_parser("list", help="list virtual desktops")
+
+    sp = sub.add_parser("keyring", help="the real login keyring inside a virtual desktop")
+    ksub = sp.add_subparsers(dest="keyring_cmd", required=True, metavar="ACTION")
+    ksub.add_parser("status", help="is the login keyring running and unlocked")
+    a = ksub.add_parser("unlock", help="serve a single-use page where the user types the password")
+    _secret_page_args(a)
+
+    sp = sub.add_parser("handoff", help="let the user type a login secret into the focused field "
+                                        "via a single-use page; the agent never sees it")
+    sp.add_argument("--prompt", default="Type the password for the field the agent has focused.",
+                    help="what the user is asked for, shown on the page")
+    sp.add_argument("--visible", action="store_true",
+                    help="plain text input (2FA codes) instead of a password box")
+    sp.add_argument("--no-enter", action="store_true",
+                    help="do not press Enter after typing (default: a ticked checkbox)")
+    _secret_page_args(sp)
 
     sp = sub.add_parser("watch", help="watch a desktop in a window, or in this terminal")
     sp.add_argument("name", nargs="?", default=None, help="virtual desktop (default: current target)")
@@ -339,6 +362,52 @@ def _vd(args: argparse.Namespace) -> int:
     raise _UsageError(f"unhandled vd action {args.vd_cmd}")
 
 
+def _qr_path(args: argparse.Namespace) -> Path | None:
+    if args.qr is None:
+        return None
+    if args.qr:
+        return Path(args.qr).expanduser()
+    from . import vd
+    return vd.state_dir() / f"{args.cmd}-qr.png"
+
+
+def _keyring(args: argparse.Namespace, wanted: str | None) -> int:
+    from . import client as client_mod
+    from . import keyring
+
+    d = client_mod.target(wanted, start=args.keyring_cmd == "unlock")
+    if d is None:
+        raise UseComputerError("keyring commands act on a virtual desktop, not --real "
+                               "(the real session unlocks its own keyring at login)")
+    if args.keyring_cmd == "status":
+        print(json.dumps({"desktop": d.name, **keyring.status(d)}, indent=2))
+        return 0
+    ok = keyring.serve(d, host=args.host, timeout=args.timeout, qr_path=_qr_path(args))
+    print("unlocked" if ok else "still locked")
+    return 0 if ok else 1
+
+
+def _handoff(args: argparse.Namespace, wanted: str | None) -> int:
+    from . import client as client_mod
+    from . import handoff, vd
+    from .client import Client
+
+    d = client_mod.target(wanted, start=False)
+    cid = args.client or os.environ.get("USE_COMPUTER_CLIENT") or "cli"
+
+    def call(op: str, **kw: Any) -> dict[str, Any]:
+        c = Client(cid)
+        try:
+            return c.call(op, **kw)
+        finally:
+            c.close()
+
+    ok = handoff.serve(args.prompt, vd.describe(d), call, host=args.host, timeout=args.timeout,
+                       enter=not args.no_enter, visible=args.visible, qr_path=_qr_path(args))
+    print("typed" if ok else "not submitted")
+    return 0 if ok else 1
+
+
 def _watch(args: argparse.Namespace, wanted: str | None) -> int:
     from . import vd, viewer
 
@@ -387,6 +456,10 @@ def main(argv: Sequence[str] | None = None) -> int:
             return _vd(args)
         if args.cmd == "watch":
             return _watch(args, wanted)
+        if args.cmd == "keyring":
+            return _keyring(args, wanted)
+        if args.cmd == "handoff":
+            return _handoff(args, wanted)
 
         op, payload = _request(args)
         # Read-only/teardown commands attach to a virtual desktop but never start one.

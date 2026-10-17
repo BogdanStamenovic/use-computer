@@ -12,6 +12,12 @@
 #   real PipeWire daemon -- which is also why a viewer running on the real session
 #   can consume this shell's stream.
 #
+# - A gnome-keyring-daemon on this bus, LOCKED, over the real ~/.local/share/keyrings:
+#   a keyring daemon on any other bus is invisible here, and without one Chrome cannot
+#   decrypt its cookies, so every site looks logged out. `use-computer keyring unlock`
+#   unlocks it. It runs in the foreground so it dies with this process group; a
+#   daemonized one would outlive `vd stop`. UC_VD_KEYRING=0 turns it off.
+#
 # Runs in the foreground and blocks until the shell exits. The caller starts it with
 # setsid and kills the whole process group to stop it.
 set -euo pipefail
@@ -44,12 +50,15 @@ done
 unset DISPLAY WAYLAND_DISPLAY DBUS_SESSION_BUS_ADDRESS AT_SPI_BUS_ADDRESS
 export XDG_RUNTIME_DIR=$rt XDG_SESSION_TYPE=wayland XDG_CURRENT_DESKTOP=GNOME
 export UC_VD_ENVFILE=$envfile UC_VD_SIZE=$size UC_VD_DISPLAY=$wl
-export UC_LAUNCHER=$launcher UC_REGISTRY=$registry
+export UC_LAUNCHER=$launcher UC_REGISTRY=$registry UC_VD_KEYRING=${UC_VD_KEYRING:-1}
 
 exec dbus-run-session -- bash -c '
   "$UC_LAUNCHER" --launch-immediately &
   for _ in $(seq 50); do [ -S "$XDG_RUNTIME_DIR/at-spi/bus" ] && break; sleep 0.1; done
   "$UC_REGISTRY" &
+  if [ "$UC_VD_KEYRING" != 0 ] && command -v gnome-keyring-daemon >/dev/null; then
+    gnome-keyring-daemon --start --foreground --components=secrets,pkcs11 >/dev/null &
+  fi
   sleep 0.5
   gnome-shell --headless --wayland --no-x11 \
       --virtual-monitor "$UC_VD_SIZE" --wayland-display "$UC_VD_DISPLAY" &
