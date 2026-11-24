@@ -186,6 +186,16 @@ def _build_parser() -> argparse.ArgumentParser:
     sp.add_argument("--format", dest="tty_format", choices=["kitty", "sixels", "iterm", "symbols"],
                     help="terminal graphics format (default: auto-detect)")
 
+    sp = sub.add_parser("seat", help="a second person's own desktop on a TV, with their own USB keyboard/mouse")
+    sp.add_argument("name", nargs="?", default="guest", help="virtual desktop name (default: guest)")
+    sp.add_argument("--monitor", default=None, metavar="CONNECTOR", help="output to fullscreen on, e.g. HDMI-A-1 (default: first external)")
+    sp.add_argument("--size", default=None, metavar="WxH", help="guest desktop size (default: TV mode, capped at 1920 wide)")
+    sp.add_argument("--device", action="append", default=None, metavar="PATH", help="forward only these /dev/input/eventN (default: every USB keyboard/mouse, hot-plugged)")
+    sp.add_argument("--speed", type=float, default=1.0, help="guest pointer speed multiplier")
+    sp.add_argument("--no-browser", action="store_true", help="don't open a guest Chrome")
+    sp.add_argument("--keep-profile", action="store_true", help="keep the guest Chrome profile on exit (default: wiped)")
+    sp.add_argument("--keep-desktop", action="store_true", help="leave the guest desktop running on exit")
+
     sp = sub.add_parser("audio", help="listen/transcribe (needs the audio extra)")
     asub = sp.add_subparsers(dest="audio_cmd", required=True, metavar="ACTION")
     a = asub.add_parser("setup", help="install faster-whisper and download the model")
@@ -454,6 +464,11 @@ def main(argv: Sequence[str] | None = None) -> int:
         wanted = "real" if args.real else args.desktop
         if args.cmd == "vd":
             return _vd(args)
+        if args.cmd == "seat":
+            from . import seat
+            return seat.run(args.name, monitor=args.monitor, size=args.size, devices=args.device,
+                            speed=args.speed, browser=not args.no_browser,
+                            keep_profile=args.keep_profile, keep_desktop=args.keep_desktop)
         if args.cmd == "watch":
             return _watch(args, wanted)
         if args.cmd == "keyring":

@@ -154,6 +154,7 @@ use-computer stop                       # end the session, indicator disappears
 | `watch [NAME] [--tty] [--control] [--fullscreen] [--fps N] [--format kitty\|sixels\|symbols]` | see one |
 | `keyring status`, `keyring unlock [--qr [PNG]] [--host] [--timeout]` | the real login keyring inside a virtual desktop |
 | `handoff [--prompt TEXT] [--visible] [--no-enter] [--qr [PNG]]` | the user types a password/2FA code into the focused field |
+| `seat [NAME] [--monitor CONN] [--size WxH] [--device PATH] [--speed F] [--no-browser] [--keep-profile]` | a second person's desktop on a TV (below) |
 | `status`, `stop`, `resume`, `shutdown`, `daemon`, `doctor`, `mcp-register`, `mcp-unregister` | plumbing |
 
 `--desktop NAME` picks which virtual desktop to drive (default `agent`); `--real` drives your
@@ -199,6 +200,23 @@ Odd-looking choices, explained:
 - **handoff runs under the caller's control lease.** A shell-run handoff from an MCP agent would
   otherwise be locked out by that agent's own 30 s lease; the MCP tool runs the page inside the
   MCP server for that reason.
+### A second person on the same laptop (`seat`)
+
+Plug a TV in, run `use-computer seat`, plug a USB keyboard and mouse in. The TV shows a
+separate GNOME desktop with a fresh Chrome profile; the USB devices drive only that desktop,
+and the laptop's own keyboard and touchpad stay with you. Ctrl-C ends it, closes the guest
+Chrome and **wipes its profile** unless `--keep-profile`.
+
+Limits, honestly:
+
+- It is a virtual desktop streamed into a fullscreen window, not real multiseat (that needs a
+  second GPU). Frames are copied on the CPU at 30 fps — fine for a browser, not for games.
+- The guest runs as *you*: same home directory, same files. Their Chrome profile is separate;
+  their file manager is not.
+- Every USB keyboard/mouse plugged in while it runs is taken; access is granted per device with
+  `sudo setfacl` (needs passwordless sudo, or run the printed command yourself).
+- Your pointer can still wander onto the TV output; it is hidden there and does nothing.
+- No sound routing: the guest's audio plays wherever yours does.
 
 ## How it works
 

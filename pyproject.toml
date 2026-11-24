@@ -30,6 +30,7 @@ dependencies = [
 
 [project.optional-dependencies]
 audio = ["faster-whisper>=1.1"]
+seat = ["evdev>=1.7"]
 dev = [
   "pytest>=8.0,<10",
   "ruff>=0.6,<1",
