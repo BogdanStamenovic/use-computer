@@ -121,11 +121,20 @@ class Forwarder:
         for path in explicit if explicit is not None else find_usb_input():
             if path in self.devices or path in self.failed:
                 continue
+            dev = None
             try:
                 _ensure_access(path)
                 dev = evdev.InputDevice(path)
                 dev.grab()
-            except (OSError, UseComputerError) as exc:
+            except OSError as exc:
+                if dev is not None:
+                    dev.close()
+                if exc.errno == errno.EBUSY:
+                    continue  # another grabber (e.g. a seat being replaced); retry next scan
+                _log(f"skipping {path}: {exc}")
+                self.failed.add(path)
+                continue
+            except UseComputerError as exc:
                 _log(f"skipping {path}: {exc}")
                 self.failed.add(path)
                 continue
@@ -260,6 +269,29 @@ def _profile_dir(name: str) -> Path:
         / "use-computer" / "seat" / name / "chrome"
 
 
+def _guest_launchers(name: str, exe: str) -> Path:
+    """An XDG data dir whose google-chrome.desktop opens the guest profile.
+
+    The guest shell shares the owner's home, so the dock's Chrome icon would run plain
+    google-chrome-stable; Chrome's singleton then hands the request to the *owner's*
+    running Chrome and the window opens on the owner's screen, signed in as the owner.
+    Prepending this dir to XDG_DATA_DIRS for the guest shell shadows the system
+    launcher (nothing in ~/.local/share/applications shadows it first).
+    """
+    root = _profile_dir(name).parent / "xdg"
+    apps = root / "applications"
+    apps.mkdir(parents=True, exist_ok=True)
+    flags = (f"--user-data-dir={_profile_dir(name)} --ozone-platform=wayland --no-first-run "
+             "--no-default-browser-check --password-store=basic")
+    entry = ("[Desktop Entry]\nVersion=1.0\nType=Application\nName=Google Chrome\n"
+             f"Exec={exe} {flags} %U\nIcon=google-chrome\nTerminal=false\n"
+             "Categories=Network;WebBrowser;\nStartupWMClass=Google-chrome\n"
+             "MimeType=text/html;x-scheme-handler/http;x-scheme-handler/https;\n")
+    for fn in ("google-chrome.desktop", "com.google.Chrome.desktop"):
+        (apps / fn).write_text(entry)
+    return root
+
+
 def launch_browser(d: vd.Desktop, name: str) -> subprocess.Popen[bytes] | None:
     exe = next((shutil.which(b) for b in ("google-chrome-stable", "google-chrome",
                                            "chromium") if shutil.which(b)), None)
@@ -267,6 +299,9 @@ def launch_browser(d: vd.Desktop, name: str) -> subprocess.Popen[bytes] | None:
         _log("no Chrome/Chromium found; the guest can open apps from Activities")
         return None
     prof = _profile_dir(name)
+    if _profile_pids(prof):
+        _log("guest Chrome already running; leaving it")
+        return None
     prof.mkdir(parents=True, exist_ok=True)
     env = {k: v for k, v in os.environ.items() if k not in ("DISPLAY", "WAYLAND_SOCKET")}
     env.update(d.env)
@@ -342,29 +377,58 @@ def run(name: str = "guest", monitor: str | None = None, size: str | None = None
         size = _fit_size(mode, 1920) if mode else vd.DEFAULT_SIZE
     _log(f"TV: {monitor or 'none connected (windowed)'}; guest desktop {size}")
 
+    exe = next((shutil.which(b) for b in ("google-chrome-stable", "google-chrome")
+                if shutil.which(b)), None)
+    prev = vd.load(name)
+    if exe is not None and (prev is None or not prev.alive):
+        xdg = _guest_launchers(name, exe)
+        dirs = os.environ.get("XDG_DATA_DIRS", "/usr/local/share:/usr/share")
+        os.environ["XDG_DATA_DIRS"] = f"{xdg}:{dirs}"
     d = vd.start(name, size)
     chrome = launch_browser(d, name) if browser else None
     session = _session(d, cursor_embedded=True)
     fwd = Forwarder(session, speed)
 
     GLib.set_prgname("use-computer-seat")
-    app = Gtk.Application(application_id="dev.usecomputer.seat")
+    # NON_UNIQUE: a second seat (or a test run) must not hand off to the running one.
+    from gi.repository import Gio
+    app = Gtk.Application(application_id="dev.usecomputer.seat",
+                          flags=Gio.ApplicationFlags.NON_UNIQUE)
     GLib.unix_signal_add(GLib.PRIORITY_DEFAULT, signal.SIGINT, lambda: (app.quit(), False)[1])
     GLib.unix_signal_add(GLib.PRIORITY_DEFAULT, signal.SIGTERM, lambda: (app.quit(), False)[1])
     state: dict[str, Any] = {"seq": -1}
 
-    def tick() -> bool:
-        try:
-            frame = session.frame()
-        except UseComputerError:
-            return True
-        if frame.seq != state["seq"]:
-            state["seq"] = frame.seq
-            h, w, _ = frame.pixels.shape
-            tex = Gdk.MemoryTexture.new(w, h, Gdk.MemoryFormat.R8G8B8,
-                                        GLib.Bytes.new(frame.pixels.tobytes()), w * 3)
-            state["pic"].set_paintable(tex)
-        return True
+    def start_display(pic: Any) -> None:
+        """Show the guest's screencast straight from PipeWire on the GPU.
+
+        The generic viewer path (appsink -> videoconvert to RGB -> numpy -> MemoryTexture,
+        polled every 33 ms) measured ~35 fps and 50-80 ms hand-to-screen on this
+        laptop: fine to watch an agent, sluggish to *use*. gtk4paintablesink imports
+        Mutter's DMA-BUFs as GL textures and repaints per frame, so there is no CPU
+        conversion and no polling interval.
+        """
+        from gi.repository import Gst
+        # The RemoteSession's own appsink pipeline is only for screenshots; a second
+        # consumer on the node would make Mutter render for both. Drop it.
+        if session._pipeline is not None:
+            session._pipeline.set_state(Gst.State.NULL)
+            session._pipeline = None
+        desc = (f"pipewiresrc path={session.node_id} do-timestamp=true keepalive-time=1000 ! "
+                "queue max-size-buffers=1 leaky=downstream ! "
+                "gtk4paintablesink name=sink sync=false")
+        pipe = Gst.parse_launch(desc)
+        sink = pipe.get_by_name("sink")
+        pic.set_paintable(sink.get_property("paintable"))
+        bus = pipe.get_bus()
+        bus.add_signal_watch()
+
+        def on_msg(_b: Any, msg: Any) -> None:
+            if msg.type == Gst.MessageType.ERROR:
+                err, dbg = msg.parse_error()
+                _log(f"display pipeline error: {err.message} ({dbg})")
+        bus.connect("message", on_msg)
+        pipe.set_state(Gst.State.PLAYING)
+        state["pipe"] = pipe
 
     def on_activate(a: Any) -> None:
         win = Gtk.ApplicationWindow(application=a, title=f"use-computer seat — {name}")
@@ -386,7 +450,7 @@ def run(name: str = "guest", monitor: str | None = None, size: str | None = None
         else:
             win.set_default_size(1280, 720)
         win.present()
-        GLib.timeout_add(int(1000 / max(1.0, fps)), tick)
+        start_display(pic)
         fwd.scan(devices)
         if devices is None:
             GLib.timeout_add_seconds(1, fwd.scan)
@@ -397,6 +461,9 @@ def run(name: str = "guest", monitor: str | None = None, size: str | None = None
         return app.run([])
     finally:
         _log("shutting down")
+        if state.get("pipe") is not None:
+            from gi.repository import Gst
+            state["pipe"].set_state(Gst.State.NULL)
         fwd.release_all()
         fwd.close()
         session.stop()
