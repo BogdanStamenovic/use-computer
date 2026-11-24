@@ -232,6 +232,17 @@ def external_connectors() -> list[tuple[str, str]]:
     return out
 
 
+def _same_connector(a: str, b: str) -> bool:
+    # The kernel names HDMI ports "HDMI-A-1" (sysfs), Mutter/GDK call the same port
+    # "HDMI-1"; DVI is "DVI-D-1" vs "DVI-1". Compare with the subtype letter dropped.
+    def norm(c: str) -> str:
+        parts = c.split("-")
+        if len(parts) == 3 and len(parts[1]) == 1:
+            parts.pop(1)
+        return "-".join(parts)
+    return norm(a) == norm(b)
+
+
 def _fit_size(mode: str, cap_w: int) -> str:
     try:
         w, h = (int(v) for v in mode.split("x"))
@@ -368,7 +379,7 @@ def run(name: str = "guest", monitor: str | None = None, size: str | None = None
         mons = Gdk.Display.get_default().get_monitors()
         for i in range(mons.get_n_items()):
             m = mons.get_item(i)
-            if monitor and m.get_connector() == monitor:
+            if monitor and _same_connector(m.get_connector() or "", monitor):
                 target = m
         if target is not None:
             win.fullscreen_on_monitor(target)
